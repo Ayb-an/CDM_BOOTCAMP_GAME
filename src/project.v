@@ -8,7 +8,7 @@
  * Screen layout
  *   LEFT  board (cyan)   = Player 1's area
  *   RIGHT board (orange) = Player 2's area
- *   Big number at the top = whose turn it is (1 or 2)
+ *   Bright board frame    = whose turn it is
  *   Row under each board  = placement: ships placed / battle: hits landed (7 needed)
  *
  * Phase 0 - PLACE : each player secretly places their fleet (the other looks away).
@@ -17,7 +17,7 @@
  * Phase 1 - BATTLE: players take turns, one shot each.  Cursor is yellow.
  *                   D-pad = move, A = fire.  White dot = miss, red cell with
  *                   white X = hit.
- * Phase 2 - OVER  : winner's number + frame blink white, unhit ships revealed.
+ * Phase 2 - OVER  : winner's frame blinks white, unhit ships are revealed.
  *                   A or Start = new game.  Start restarts at any time.
  */
 
@@ -269,8 +269,6 @@ module tt_um_vga_example (
     localparam [9:0] RIGHT_X  = 10'd384;
     localparam [9:0] BOARD_SZ = 10'd160;       // 5 cells * 32 px
     localparam [9:0] IND_Y    = 10'd328;
-    localparam [9:0] DIG_X    = 10'd304;
-    localparam [9:0] DIG_Y    = 10'd40;
 
     wire blink = frame_cnt[4];
 
@@ -340,35 +338,18 @@ module tt_um_vga_example (
     // indicator row under the boards
     wire in_ind_row = (vpos >= IND_Y) && (vpos < IND_Y + 10'd16) && (in_col_l || in_col_r);
 
-    // big player number (7-segment style)
-    wire       in_digit = (hpos >= DIG_X) && (hpos < DIG_X + 10'd32) &&
-                          (vpos >= DIG_Y) && (vpos < DIG_Y + 10'd48);
-    wire [7:0] dig_x = hpos[7:0] - DIG_X[7:0];
-    wire [7:0] dig_y = vpos[7:0] - DIG_Y[7:0];
-    wire seg_a = (dig_y < 8'd6);
-    wire seg_g = (dig_y >= 8'd21) && (dig_y < 8'd27);
-    wire seg_d = (dig_y >= 8'd42);
-    wire seg_b = (dig_x >= 8'd26) && (dig_y < 8'd24);
-    wire seg_e = (dig_x < 8'd6)   && (dig_y >= 8'd24);
-    wire seg_c = (dig_x >= 8'd26) && (dig_y >= 8'd24);
-    wire digit_on = turn ? (seg_a | seg_b | seg_g | seg_e | seg_d)   // "2"
-                         : (seg_b | seg_c);                          // "1"
-
-    // placement icons under the board (3, 2, 2 cells wide)
-    wire blk0   = (rel_x >= 8'd16)  && (rel_x < 8'd64);
-    wire blk1   = (rel_x >= 8'd72)  && (rel_x < 8'd104);
-    wire blk2   = (rel_x >= 8'd112) && (rel_x < 8'd144);
-    wire blk_on = blk0 | blk1 | blk2;
-    wire [1:0] blk_k = blk0 ? 2'd0 : (blk1 ? 2'd1 : 2'd2);
-
-    // battle pips: 7 squares on a 16 px pitch, so the index is a bit slice
-    // instead of seven range comparators
-    wire [2:0] pip_hits = side ? hits_b : hits_a;
+    // One indicator bar serves both phases: 7 pips on a 16 px pitch (index is
+    // a bit slice, not seven range comparators).  While placing it counts the
+    // ships already down, in battle the hits landed.  Whose turn it is is
+    // shown by the bright board frame, which replaces the old 7-segment digit.
+    wire [2:0] pip_count = (phase == PH_PLACE) ? {1'b0, ship_n}
+                                               : (side ? hits_b : hits_a);
     wire [7:0] pip_off  = rel_x - 8'd24;
     wire       pip_area = (rel_x >= 8'd24) && (rel_x < 8'd136);
     wire [2:0] pip_i    = pip_off[6:4];
     wire       pip_body = (pip_off[3:0] >= 4'd2) && (pip_off[3:0] < 4'd14);
-    wire       pip_lit  = (pip_hits > pip_i);
+    wire       pip_lit  = (pip_count > pip_i);
+    wire       pip_show = (phase != PH_PLACE) || (side == turn);
 
     reg [5:0] rgb;
 
@@ -378,28 +359,15 @@ module tt_um_vga_example (
         if (video_active) begin
             rgb = C_SEA;
 
-            // ---- player number (winner blinks white) ----
-            if (in_digit && digit_on)
-                rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
-
-            // ---- board frames (active player = bright) ----
+            // ---- board frames (active player = bright, winner blinks) ----
             if (in_outer_l && !in_board)
                 rgb = (turn == 1'b0) ? (flash_off ? C_MISS : C_P1) : C_P1_DIM;
             if (in_outer_r && !in_board)
                 rgb = (turn == 1'b1) ? (flash_off ? C_MISS : C_P2) : C_P2_DIM;
 
             // ---- indicator row ----
-            if (in_ind_row) begin
-                if (phase == PH_PLACE) begin
-                    if (blk_on && (side == turn)) begin
-                        if (blk_k < ship_n)       rgb = C_OK;
-                        else if (blk_k == ship_n) rgb = blink ? C_CURSOR : (turn ? C_P2 : C_P1);
-                        else                      rgb = C_DIM;
-                    end
-                end else begin
-                    if (pip_area && pip_body) rgb = pip_lit ? C_HIT : C_DIM;
-                end
-            end
+            if (in_ind_row && pip_area && pip_body && pip_show)
+                rgb = pip_lit ? ((phase == PH_PLACE) ? C_OK : C_HIT) : C_DIM;
 
             // ---- boards ----
             if (in_board) begin
