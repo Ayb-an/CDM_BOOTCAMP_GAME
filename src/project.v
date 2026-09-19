@@ -1,7 +1,26 @@
 /*
  * Battleship VGA - 2 player hot-seat game for Tiny Tapeout (640x480 VGA + Gamepad Pmod)
- * Copyright (c) 2026
+ * Copyright (c) 2026 <your name>
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Board: 5x5 per player.  Fleet per player: one 3-cell ship + two 2-cell ships.
+ *
+ * Screen layout
+ *   LEFT  board (cyan)   = Player 1's area
+ *   RIGHT board (orange) = Player 2's area
+ *   Big number at the top = whose turn it is (1 or 2)
+ *   Row under each board  = placement: ships placed / battle: hits landed (7 needed)
+ *
+ * Phase 0 - PLACE : each player secretly places their fleet (the other looks away).
+ *                   D-pad = move, B (or X/Y) = rotate, A = place ship.
+ *                   Green preview = OK, red preview = can't place there.
+ * Phase 1 - BATTLE: players take turns, one shot each.  Cursor is yellow.
+ *                   D-pad = move, A = fire.  Turn switches immediately after
+ *                   each shot -- whose turn it is shown by the big number and
+ *                   bright board frame, so pass the pad to the other player.
+ *                   White dot = miss, red cell with white X = hit.
+ * Phase 2 - OVER  : winner's number + frame blink, unhit ships are revealed.
+ *                   A or Start = new game.  Start restarts at any time.
  */
 
 `default_nettype none
@@ -18,7 +37,7 @@ module tt_um_vga_example (
 );
 
     // ------------------------------------------------------------------
-    // Settings
+    // Settings you can tweak
     // ------------------------------------------------------------------
     localparam       HIT_AGAIN  = 1'b0;  // 1 = a hit lets the same player shoot again
     localparam [2:0] TOTAL_HITS = 3'd7;  // total ship cells per fleet (3 + 2 + 2)
@@ -26,7 +45,6 @@ module tt_um_vga_example (
     localparam [1:0] PH_PLACE  = 2'd0;
     localparam [1:0] PH_BATTLE = 2'd1;
     localparam [1:0] PH_OVER   = 2'd2;
-    localparam [1:0] PH_HELP   = 2'd3;
 
     // ------------------------------------------------------------------
     // VGA timing
@@ -45,7 +63,7 @@ module tt_um_vga_example (
     );
 
     // ------------------------------------------------------------------
-    // Gamepad Pmod
+    // Gamepad Pmod (driver comes from gamepad_pmod.v)
     // ------------------------------------------------------------------
     wire inp_b, inp_y, inp_select, inp_start;
     wire inp_up, inp_down, inp_left, inp_right;
@@ -64,6 +82,7 @@ module tt_um_vga_example (
         .is_present(inp_is_present)
     );
 
+    // Buttons are sampled once per frame; "press" = new press this frame.
     wire [11:0] btn = {inp_r, inp_l, inp_x, inp_y, inp_a, inp_b,
                        inp_start, inp_select, inp_right, inp_left, inp_down, inp_up};
     reg  [11:0] btn_prev;
@@ -84,35 +103,31 @@ module tt_um_vga_example (
     // ------------------------------------------------------------------
     // Game state
     // ------------------------------------------------------------------
-    reg [24:0] ships_a, ships_b;   // fleet maps
+    reg [24:0] ships_a, ships_b;   // fleet maps      (bit = y*5 + x)
     reg [24:0] shots_a, shots_b;   // shots fired BY player A / B
     reg [2:0]  hits_a,  hits_b;    // hits landed BY player A / B
     reg [1:0]  phase;
     reg        turn;               // placing player / shooting player / winner (0 = P1, 1 = P2)
-    reg [1:0]  ship_n;             // ships already placed by current placer (0..2)
+    reg [1:0]  ship_n;             // ships already placed by the current placer (0..2)
     reg [2:0]  cur_x, cur_y;       // cursor 0..4
     reg        orient;             // 0 = horizontal, 1 = vertical
-    reg [5:0]  frame_cnt;          // free running frame counter
-    reg        battle_wait;        // 1 = paused on "YOUR TURN" screen
-    reg [6:0]  wait_cnt;           // hand-off timer
-
-    localparam [6:0] HANDOFF_FRAMES = 7'd60;
+    reg [5:0]  frame_cnt;          // free running frame counter (blinking)
 
     // ---- placement helpers ----
     wire [24:0] my_ships = turn ? ships_b : ships_a;
+
     wire [2:0] x1 = cur_x + (orient ? 3'd0 : 3'd1);
     wire [2:0] y1 = cur_y + (orient ? 3'd1 : 3'd0);
     wire [2:0] x2 = cur_x + (orient ? 3'd0 : 3'd2);
     wire [2:0] y2 = cur_y + (orient ? 3'd2 : 3'd0);
 
-    wire has3 = (ship_n == 2'd0);
+    wire has3 = (ship_n == 2'd0);                       // first ship has 3 cells, others 2
     wire in1  = (x1 <= 3'd4) && (y1 <= 3'd4);
     wire in2  = (x2 <= 3'd4) && (y2 <= 3'd4);
     wire fits = in1 && (~has3 || in2);
 
     wire [24:0] cell0;
     wire [24:0] place_mask;
-
     genvar gi;
     generate
         for (gi = 0; gi < 25; gi = gi + 1) begin : g_cells
@@ -124,7 +139,6 @@ module tt_um_vga_example (
                                   | (has3 && in2 && (x2 == GX) && (y2 == GY));
         end
     endgenerate
-
     wire place_ok = fits && ((place_mask & my_ships) == 25'd0);
 
     // ---- battle helpers ----
@@ -133,10 +147,11 @@ module tt_um_vga_example (
     wire already  = |(my_shots    & cell0);
     wire is_hit   = |(enemy_ships & cell0);
     wire last_hit = is_hit && ((turn ? hits_b : hits_a) == (TOTAL_HITS - 3'd1));
-    wire restart  = press_start | ((phase == PH_OVER) & press_a);
+
+    wire restart = press_start | ((phase == PH_OVER) & press_a);
 
     // ------------------------------------------------------------------
-    // Game logic
+    // Game logic (runs once per frame)
     // ------------------------------------------------------------------
     always @(posedge clk) begin
         if (~rst_n) begin
@@ -146,7 +161,7 @@ module tt_um_vga_example (
             shots_b     <= 25'd0;
             hits_a      <= 3'd0;
             hits_b      <= 3'd0;
-            phase       <= PH_HELP;
+            phase       <= PH_PLACE;
             turn        <= 1'b0;
             ship_n      <= 2'd0;
             cur_x       <= 3'd0;
@@ -154,8 +169,6 @@ module tt_um_vga_example (
             orient      <= 1'b0;
             btn_prev    <= 12'd0;
             frame_cnt   <= 6'd0;
-            battle_wait <= 1'b0;
-            wait_cnt    <= 7'd0;
         end else if (frame_tick) begin
             btn_prev  <= btn;
             frame_cnt <= frame_cnt + 6'd1;
@@ -173,45 +186,41 @@ module tt_um_vga_example (
                 cur_x       <= 3'd0;
                 cur_y       <= 3'd0;
                 orient      <= 1'b0;
-                battle_wait <= 1'b0;
-                wait_cnt    <= 7'd0;
             end else begin
-                if (phase == PH_PLACE || (phase == PH_BATTLE && !battle_wait)) begin
+                // cursor movement (clamped to the 5x5 grid); frozen on the
+                // game-over screen
+                if (phase == PH_PLACE || phase == PH_BATTLE) begin
                     if (press_left  && cur_x != 3'd0) cur_x <= cur_x - 3'd1;
                     if (press_right && cur_x != 3'd4) cur_x <= cur_x + 3'd1;
                     if (press_up    && cur_y != 3'd0) cur_y <= cur_y - 3'd1;
                     if (press_down  && cur_y != 3'd4) cur_y <= cur_y + 3'd1;
                 end
 
-                if (phase == PH_HELP) begin
-                    if (press_a) phase <= PH_PLACE;
-                end else if (phase == PH_PLACE) begin
+                if (phase == PH_PLACE) begin
                     if (press_b | press_x | press_y) orient <= ~orient;
+
                     if (press_a && place_ok) begin
                         if (~turn) ships_a <= ships_a | place_mask;
                         else       ships_b <= ships_b | place_mask;
 
-                        if (ship_n == 2'd2) begin
+                        if (ship_n == 2'd2) begin       // fleet complete
                             ship_n <= 2'd0;
                             cur_x  <= 3'd0;
                             cur_y  <= 3'd0;
                             orient <= 1'b0;
                             if (~turn) begin
-                                turn <= 1'b1;
+                                turn <= 1'b1;           // Player 2 places next
                             end else begin
-                                turn  <= 1'b0;
+                                turn  <= 1'b0;          // both done: Player 1 fires first
                                 phase <= PH_BATTLE;
                             end
                         end else begin
                             ship_n <= ship_n + 2'd1;
                         end
                     end
+
                 end else if (phase == PH_BATTLE) begin
-                    if (battle_wait) begin
-                        wait_cnt <= wait_cnt + 7'd1;
-                        if (press_a || (wait_cnt >= HANDOFF_FRAMES))
-                            battle_wait <= 1'b0;
-                    end else if (press_a && !already) begin
+                    if (press_a && !already) begin
                         if (~turn) shots_a <= shots_a | cell0;
                         else       shots_b <= shots_b | cell0;
 
@@ -221,12 +230,11 @@ module tt_um_vga_example (
                         end
 
                         if (last_hit) begin
-                            phase <= PH_OVER;
+                            phase <= PH_OVER;           // 'turn' stays = winner
                         end else if (HIT_AGAIN & is_hit) begin
+                            // same player fires again immediately
                         end else begin
-                            turn        <= ~turn;
-                            battle_wait <= 1'b1;
-                            wait_cnt    <= 7'd0;
+                            turn <= ~turn;
                         end
                     end
                 end
@@ -237,32 +245,42 @@ module tt_um_vga_example (
     // ------------------------------------------------------------------
     // Rendering
     // ------------------------------------------------------------------
+    // colours are {R[1:0], G[1:0], B[1:0]}
     localparam [5:0] C_BLACK  = 6'b00_00_00;
-    localparam [5:0] C_SEA    = 6'b00_00_01;
-    localparam [5:0] C_WATER  = 6'b00_01_10;
-    localparam [5:0] C_P1     = 6'b00_11_11;
-    localparam [5:0] C_P2     = 6'b11_10_00;
+    localparam [5:0] C_SEA    = 6'b00_00_01;   // background / grid lines
+    localparam [5:0] C_WATER  = 6'b00_01_10;   // empty cell
+    localparam [5:0] C_P1     = 6'b00_11_11;   // cyan
+    localparam [5:0] C_P2     = 6'b11_10_00;   // orange
     localparam [5:0] C_P1_DIM = 6'b00_01_01;
     localparam [5:0] C_P2_DIM = 6'b01_01_00;
-    localparam [5:0] C_DIM    = 6'b01_01_01;
-    localparam [5:0] C_SHIP   = 6'b10_10_10;
-    localparam [5:0] C_HIT    = 6'b11_00_00;
-    localparam [5:0] C_MISS   = 6'b11_11_11;
-    localparam [5:0] C_OK     = 6'b00_11_00;
-    localparam [5:0] C_BAD    = 6'b11_00_01;
-    localparam [5:0] C_CURSOR = 6'b11_11_00;
+    localparam [5:0] C_DIM    = 6'b01_01_01;   // grey
+    localparam [5:0] C_SHIP   = 6'b10_10_10;   // ship (light grey)
+    localparam [5:0] C_HIT    = 6'b11_00_00;   // red
+    localparam [5:0] C_MISS   = 6'b11_11_11;   // white
+    localparam [5:0] C_OK     = 6'b00_11_00;   // green
+    localparam [5:0] C_BAD    = 6'b11_00_01;   // red/pink
+    localparam [5:0] C_CURSOR = 6'b11_11_00;   // yellow
 
     localparam [9:0] BOARD_Y  = 10'd136;
     localparam [9:0] LEFT_X   = 10'd96;
     localparam [9:0] RIGHT_X  = 10'd384;
-    localparam [9:0] BOARD_SZ = 10'd160;
-    localparam [9:0] IND_Y    = 10'd328;
+    localparam [9:0] BOARD_SZ = 10'd160;       // 5 cells * 32 px
+    localparam [9:0] IND_Y    = 10'd328;       // indicator row under the boards
     localparam [9:0] DIG_X    = 10'd304;
     localparam [9:0] DIG_Y    = 10'd40;
 
     wire blink = frame_cnt[4];
 
-    // ---- Tiny 5x7 Font Lookup ----
+    // ------------------------------------------------------------------
+    // Tiny 5x7 text renderer for the winner banner only ("PLAYER WINS").
+    // The help screen and turn hand-off banner were removed to save area,
+    // so this no longer needs a message table or a line_id selector --
+    // just one fixed 11-character string. Letters used: A,E,I,L,N,P,R,S,W,Y.
+    //
+    // TXT_SCALE / CHAR_W / CHAR_H are kept as powers of two so the
+    // pixel->glyph-cell math (rx/CHAR_W, .../TXT_SCALE) synthesizes as
+    // plain bit-slicing instead of a constant-divider circuit.
+    // ------------------------------------------------------------------
     function [4:0] font_row;
         input [4:0] ch;
         input [2:0] row;
@@ -270,26 +288,16 @@ module tt_um_vga_example (
         begin
             case (ch)
                 5'd0 : g = {5'b01110,5'b10001,5'b10001,5'b11111,5'b10001,5'b10001,5'b10001}; // A
-                5'd1 : g = {5'b11110,5'b10001,5'b10001,5'b11110,5'b10001,5'b10001,5'b11110}; // B
-                5'd2 : g = {5'b01111,5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b01111}; // C
-                5'd3 : g = {5'b11110,5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b11110}; // D
                 5'd4 : g = {5'b11111,5'b10000,5'b10000,5'b11110,5'b10000,5'b10000,5'b11111}; // E
-                5'd5 : g = {5'b11111,5'b10000,5'b10000,5'b11110,5'b10000,5'b10000,5'b10000}; // F
-                5'd6 : g = {5'b10001,5'b10001,5'b10001,5'b11111,5'b10001,5'b10001,5'b10001}; // H
                 5'd7 : g = {5'b11111,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100,5'b11111}; // I
                 5'd8 : g = {5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b11111}; // L
-                5'd9 : g = {5'b10001,5'b11011,5'b10101,5'b10101,5'b10001,5'b10001,5'b10001}; // M
                 5'd10: g = {5'b10001,5'b11001,5'b10101,5'b10101,5'b10011,5'b10001,5'b10001}; // N
-                5'd11: g = {5'b01110,5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01110}; // O
                 5'd12: g = {5'b11110,5'b10001,5'b10001,5'b11110,5'b10000,5'b10000,5'b10000}; // P
                 5'd13: g = {5'b11110,5'b10001,5'b10001,5'b11110,5'b10100,5'b10010,5'b10001}; // R
                 5'd14: g = {5'b01111,5'b10000,5'b10000,5'b01110,5'b00001,5'b00001,5'b11110}; // S
-                5'd15: g = {5'b11111,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100}; // T
-                5'd16: g = {5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01110}; // U
-                5'd17: g = {5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01010,5'b00100}; // V
                 5'd18: g = {5'b10001,5'b10001,5'b10001,5'b10101,5'b10101,5'b11011,5'b10001}; // W
                 5'd19: g = {5'b10001,5'b10001,5'b01010,5'b00100,5'b00100,5'b00100,5'b00100}; // Y
-                default: g = 35'd0;
+                default: g = 35'd0; // space / unknown -> blank
             endcase
             case (row)
                 3'd0: font_row = g[34:30];
@@ -298,69 +306,34 @@ module tt_um_vga_example (
                 3'd3: font_row = g[19:15];
                 3'd4: font_row = g[14:10];
                 3'd5: font_row = g[9:5];
-                default: font_row = g[4:0];
+                default: font_row = g[4:0];   // row 6 (and any stray value)
             endcase
         end
     endfunction
 
+    // Fixed message, 11 characters, padded with space = code 31: "PLAYER WINS"
     function [4:0] msg_char;
-        input [3:0] line_id;
         input [3:0] pos;
         begin
-            case (line_id)
-                4'd0: case (pos) // "BATTLESHIP"
-                        4'd0:msg_char=1; 4'd1:msg_char=0; 4'd2:msg_char=15; 4'd3:msg_char=15;
-                        4'd4:msg_char=8; 4'd5:msg_char=4; 4'd6:msg_char=14; 4'd7:msg_char=6;
-                        4'd8:msg_char=7; 4'd9:msg_char=12; default: msg_char=31;
-                      endcase
-                4'd1: case (pos) // "PAD MOVE"
-                        4'd0:msg_char=12; 4'd1:msg_char=0; 4'd2:msg_char=3; 4'd3:msg_char=31;
-                        4'd4:msg_char=9;  4'd5:msg_char=11; 4'd6:msg_char=17; 4'd7:msg_char=4;
-                        default: msg_char=31;
-                      endcase
-                4'd2: case (pos) // "B ROTATE"
-                        4'd0:msg_char=1; 4'd1:msg_char=31; 4'd2:msg_char=13; 4'd3:msg_char=11;
-                        4'd4:msg_char=15; 4'd5:msg_char=0; 4'd6:msg_char=15; 4'd7:msg_char=4;
-                        default: msg_char=31;
-                      endcase
-                4'd3: case (pos) // "A FIRE"
-                        4'd0:msg_char=0; 4'd1:msg_char=31; 4'd2:msg_char=5; 4'd3:msg_char=7;
-                        4'd4:msg_char=13; 4'd5:msg_char=4; default: msg_char=31;
-                      endcase
-                4'd4: case (pos) // "PRESS START"
-                        4'd0:msg_char=12; 4'd1:msg_char=13; 4'd2:msg_char=4; 4'd3:msg_char=14;
-                        4'd4:msg_char=14; 4'd5:msg_char=31; 4'd6:msg_char=14; 4'd7:msg_char=15;
-                        4'd8:msg_char=0; 4'd9:msg_char=13; 4'd10:msg_char=15; default: msg_char=31;
-                      endcase
-                4'd5: case (pos) // "YOUR TURN"
-                        4'd0:msg_char=19; 4'd1:msg_char=11; 4'd2:msg_char=16; 4'd3:msg_char=13;
-                        4'd4:msg_char=31; 4'd5:msg_char=15; 4'd6:msg_char=16; 4'd7:msg_char=13;
-                        4'd8:msg_char=10; default: msg_char=31;
-                      endcase
-                4'd6: case (pos) // "PRESS A"
-                        4'd0:msg_char=12; 4'd1:msg_char=13; 4'd2:msg_char=4; 4'd3:msg_char=14;
-                        4'd4:msg_char=14; 4'd5:msg_char=31; 4'd6:msg_char=0; default: msg_char=31;
-                      endcase
-                default: case (pos) // line 7: "PLAYER WINS"
-                        4'd0:msg_char=12; 4'd1:msg_char=8; 4'd2:msg_char=0; 4'd3:msg_char=19;
-                        4'd4:msg_char=4; 4'd5:msg_char=13; 4'd6:msg_char=31; 4'd7:msg_char=18;
-                        4'd8:msg_char=7; 4'd9:msg_char=10; 4'd10:msg_char=14; default: msg_char=31;
-                      endcase
+            case (pos)
+                4'd0:msg_char=12; 4'd1:msg_char=8; 4'd2:msg_char=0; 4'd3:msg_char=19;
+                4'd4:msg_char=4; 4'd5:msg_char=13; 4'd6:msg_char=31; 4'd7:msg_char=18;
+                4'd8:msg_char=7; 4'd9:msg_char=10; 4'd10:msg_char=14; default: msg_char=31;
             endcase
         end
     endfunction
 
-    localparam [3:0] TXT_SCALE = 4'd4;
-    localparam [9:0] CHAR_W    = 10'd32;
-    localparam [9:0] CHAR_H    = 10'd32;
+    // 1 = the pixel at (hpos_,vpos_) is lit for the fixed message, drawn
+    // with its top-left corner at (tx,ty), scaled up by TXT_SCALE.
+    localparam [3:0] TXT_SCALE = 4'd4;     // power of 2 -> free bit-slicing below
+    localparam [9:0] CHAR_W    = 10'd32;   // 8 * TXT_SCALE (5px glyph + gap, power of 2)
+    localparam [9:0] CHAR_H    = 10'd32;   // 8 * TXT_SCALE (7px glyph + gap, power of 2)
 
     function line_pixel;
         input [9:0] hpos_, vpos_, tx, ty;
-        input [3:0] line_id;
         reg [9:0] rx, ry;
         reg [4:0] cidx;
-        reg [3:0] cx;
-        reg [2:0] cy;
+        reg [3:0] cx, cy;
         reg [4:0] frow;
         begin
             line_pixel = 1'b0;
@@ -368,11 +341,11 @@ module tt_um_vga_example (
                 rx = hpos_ - tx;
                 ry = vpos_ - ty;
                 if (ry < CHAR_H && rx < 12*CHAR_W) begin
-                    cidx = rx[9:5];
-                    cx   = rx[4:2];
-                    cy   = ry[4:2];
+                    cidx = rx[9:5];              // rx / CHAR_W  (CHAR_W = 32)
+                    cx   = rx[4:2];               // (rx % CHAR_W) / TXT_SCALE
+                    cy   = ry[4:2];               // ry / TXT_SCALE
                     if (cx < 4'd5) begin
-                        frow = font_row(msg_char(line_id, cidx[3:0]), cy);
+                        frow = font_row(msg_char(cidx[3:0]), cy[2:0]);
                         line_pixel = frow[4-cx];
                     end
                 end
@@ -380,61 +353,25 @@ module tt_um_vga_example (
         end
     endfunction
 
-    // ------------------------------------------------------------------
-    // Shared Text Multiplexer
-    // ------------------------------------------------------------------
-    localparam [9:0] TXT_X   = 10'd128;
+    localparam [9:0] TXT_X   = 10'd128;   // (640 - 12*CHAR_W) / 2
     localparam [9:0] LINE_SP = 10'd32;
-    localparam [9:0] WAIT_TY = 10'd190;
     localparam [9:0] WIN_TY  = 10'd190;
 
-    reg  [3:0] text_line_id;
-    reg  [9:0] text_ty;
-    reg        text_enable;
+    wire txt_pixel = (phase == PH_OVER) && line_pixel(hpos, vpos, TXT_X, WIN_TY);
 
-    always @* begin
-        text_enable  = 1'b0;
-        text_line_id = 4'd0;
-        text_ty      = 10'd0;
+    wire win_box  = (vpos >= WIN_TY - 10'd8) && (vpos < WIN_TY + LINE_SP) &&
+                    (hpos >= TXT_X - 10'd8) && (hpos < TXT_X + 12*CHAR_W + 10'd8);
 
-        if (phase == PH_HELP) begin
-            if (vpos >= 10'd90 && vpos < 10'd250) begin
-                text_enable  = 1'b1;
-                text_line_id = {2'b00, (vpos - 10'd90) >> 5};
-                text_ty      = 10'd90 + ({6'd0, text_line_id} * LINE_SP);
-            end
-        end else if (phase == PH_BATTLE && battle_wait) begin
-            if (vpos >= 10'd190 && vpos < 10'd254) begin
-                text_enable  = 1'b1;
-                text_line_id = (vpos >= 10'd222) ? 4'd6 : 4'd5;
-                text_ty      = (vpos >= 10'd222) ? 10'd222 : 10'd190;
-            end
-        end else if (phase == PH_OVER) begin
-            if (vpos >= 10'd190 && vpos < 10'd222) begin
-                text_enable  = 1'b1;
-                text_line_id = 4'd7;
-                text_ty      = 10'd190;
-            end
-        end
-    end
-
-    wire text_pixel = text_enable ? line_pixel(hpos, vpos, TXT_X, text_ty, text_line_id) : 1'b0;
-
-    wire wait_box = (vpos >= WAIT_TY - 10'd8) && (vpos < WAIT_TY + 2*LINE_SP) &&
-                    (hpos >= TXT_X  - 10'd8) && (hpos < TXT_X + 12*CHAR_W + 10'd8);
-
-    wire win_box = (vpos >= WIN_TY - 10'd8) && (vpos < WIN_TY + LINE_SP) &&
-                   (hpos >= TXT_X - 10'd8) && (hpos < TXT_X + 12*CHAR_W + 10'd8);
-
-    // Board flags
+    // which board is the pixel in?
     wire in_rows  = (vpos >= BOARD_Y) && (vpos < BOARD_Y + BOARD_SZ);
     wire in_col_l = (hpos >= LEFT_X)  && (hpos < LEFT_X  + BOARD_SZ);
     wire in_col_r = (hpos >= RIGHT_X) && (hpos < RIGHT_X + BOARD_SZ);
     wire in_board = in_rows && (in_col_l || in_col_r);
-    wire side     = in_col_r;
+    wire side     = in_col_r;                  // 0 = left/P1 board, 1 = right/P2 board
 
     wire [9:0] rel_x = hpos - (side ? RIGHT_X : LEFT_X);
     wire [9:0] rel_y = vpos - BOARD_Y;
+
     wire [2:0] cell_x = rel_x[7:5];
     wire [2:0] cell_y = rel_y[7:5];
     wire [4:0] in_x   = rel_x[4:0];
@@ -443,14 +380,15 @@ module tt_um_vga_example (
     wire grid_line   = (in_x < 5'd2) || (in_y < 5'd2);
     wire cursor_edge = (in_x < 5'd3) || (in_x >= 5'd29) || (in_y < 5'd3) || (in_y >= 5'd29);
     wire dot         = (in_x >= 5'd12) && (in_x < 5'd20) && (in_y >= 5'd12) && (in_y < 5'd20);
+
     wire [4:0] dxy   = (in_x > in_y) ? (in_x - in_y) : (in_y - in_x);
     wire [5:0] sxy   = {1'b0, in_x} + {1'b0, in_y};
     wire       xmark = (dxy < 5'd4) || ((sxy >= 6'd28) && (sxy <= 6'd34));
 
+    // per-cell lookups
     wire [24:0] side_shots   = side ? shots_b : shots_a;
     wire [24:0] side_targets = side ? ships_a : ships_b;
     wire [24:0] pix_onehot;
-
     genvar gj;
     generate
         for (gj = 0; gj < 25; gj = gj + 1) begin : g_pix
@@ -465,46 +403,47 @@ module tt_um_vga_example (
     wire own_ship    = |(my_ships     & pix_onehot);
     wire prev_here   = |(place_mask   & pix_onehot);
 
+    // frames around the boards
     wire in_outer_rows = (vpos >= BOARD_Y - 10'd4) && (vpos < BOARD_Y + BOARD_SZ + 10'd4);
     wire in_outer_l = in_outer_rows && (hpos >= LEFT_X  - 10'd4) && (hpos < LEFT_X  + BOARD_SZ + 10'd4);
     wire in_outer_r = in_outer_rows && (hpos >= RIGHT_X - 10'd4) && (hpos < RIGHT_X + BOARD_SZ + 10'd4);
-
     wire act_l = (turn == 1'b0);
     wire act_r = (turn == 1'b1);
     wire flash_off = (phase == PH_OVER) && !blink;
 
+    // indicator row under the boards
     wire in_ind_row = (vpos >= IND_Y) && (vpos < IND_Y + 10'd16) && (in_col_l || in_col_r);
 
+    // big player number (7-segment style)
     wire       in_digit = (hpos >= DIG_X) && (hpos < DIG_X + 10'd32) &&
                           (vpos >= DIG_Y) && (vpos < DIG_Y + 10'd48);
     wire [9:0] dig_x = hpos - DIG_X;
     wire [9:0] dig_y = vpos - DIG_Y;
-
     wire seg_a = (dig_y < 10'd6);
     wire seg_g = (dig_y >= 10'd21) && (dig_y < 10'd27);
     wire seg_d = (dig_y >= 10'd42);
     wire seg_b = (dig_x >= 10'd26) && (dig_y < 10'd24);
     wire seg_e = (dig_x < 10'd6)   && (dig_y >= 10'd24);
     wire seg_c = (dig_x >= 10'd26) && (dig_y >= 10'd24);
+    wire digit_on = turn ? (seg_a | seg_b | seg_g | seg_e | seg_d)   // "2"
+                         : (seg_b | seg_c);                          // "1"
 
-    wire digit_on = turn ? (seg_a | seg_b | seg_g | seg_e | seg_d)
-                         : (seg_b | seg_c);
-
+    // placement icons under the board (3, 2, 2 cells wide)
     wire blk0   = (rel_x >= 10'd16)  && (rel_x < 10'd64);
     wire blk1   = (rel_x >= 10'd72)  && (rel_x < 10'd104);
     wire blk2   = (rel_x >= 10'd112) && (rel_x < 10'd144);
     wire blk_on = blk0 | blk1 | blk2;
     wire [1:0] blk_k = blk0 ? 2'd0 : (blk1 ? 2'd1 : 2'd2);
 
+    // battle pips: 7 small squares = hits landed by that board's shooter
     wire [2:0] pip_hits = in_col_r ? hits_b : hits_a;
     wire [6:0] pip_on;
     wire [6:0] pip_lit;
-
     genvar gp;
     generate
         for (gp = 0; gp < 7; gp = gp + 1) begin : g_pips
             localparam [9:0] PIP_X = 4 + 22 * gp;
-            localparam [2:0] PIP_I = gp[2:0];
+            localparam [2:0] PIP_I = gp;
             assign pip_on[gp]  = (rel_x >= PIP_X) && (rel_x < PIP_X + 10'd20);
             assign pip_lit[gp] = (pip_hits > PIP_I);
         end
@@ -514,76 +453,68 @@ module tt_um_vga_example (
 
     always @* begin
         rgb = C_BLACK;
+
         if (video_active) begin
-            if (phase == PH_HELP) begin
-                rgb = C_BLACK;
-                if (text_pixel) begin
-                    if (text_line_id == 4'd0)      rgb = C_MISS;
-                    else if (text_line_id == 4'd4) rgb = blink ? C_CURSOR : C_DIM;
-                    else                           rgb = C_SHIP;
+            rgb = C_SEA;
+
+            // ---- player number ----
+            if (in_digit && digit_on)
+                rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
+
+            // ---- board frames (active player = bright) ----
+            if (in_outer_l && !in_board)
+                rgb = act_l ? (flash_off ? C_MISS : C_P1) : C_P1_DIM;
+            if (in_outer_r && !in_board)
+                rgb = act_r ? (flash_off ? C_MISS : C_P2) : C_P2_DIM;
+
+            // ---- indicator row ----
+            if (in_ind_row) begin
+                if (phase == PH_PLACE) begin
+                    if (blk_on && (side == turn)) begin
+                        if (blk_k < ship_n)       rgb = C_OK;
+                        else if (blk_k == ship_n) rgb = blink ? C_CURSOR : (turn ? C_P2 : C_P1);
+                        else                       rgb = C_DIM;
+                    end
+                end else begin
+                    if (|pip_on) rgb = (|(pip_on & pip_lit)) ? C_HIT : C_DIM;
                 end
-            end else begin
-                rgb = C_SEA;
+            end
 
-                if (in_digit && digit_on)
-                    rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
-
-                if (in_outer_l && !in_board)
-                    rgb = act_l ? (flash_off ? C_MISS : C_P1) : C_P1_DIM;
-                if (in_outer_r && !in_board)
-                    rgb = act_r ? (flash_off ? C_MISS : C_P2) : C_P2_DIM;
-
-                if (in_ind_row) begin
-                    if (phase == PH_PLACE) begin
-                        if (blk_on && (side == turn)) begin
-                            if (blk_k < ship_n)       rgb = C_OK;
-                            else if (blk_k == ship_n) rgb = blink ? C_CURSOR : (turn ? C_P2 : C_P1);
-                            else                       rgb = C_DIM;
-                        end
+            // ---- boards ----
+            if (in_board) begin
+                if (phase == PH_PLACE && side != turn) begin
+                    rgb = C_BLACK;                       // hidden while the other player places
+                end else begin
+                    rgb = C_WATER;
+                    if (grid_line) begin
+                        rgb = C_SEA;
+                    end else if (phase == PH_PLACE) begin
+                        if (own_ship)  rgb = C_SHIP;
+                        if (prev_here) rgb = place_ok ? C_OK : C_BAD;
                     end else begin
-                        if (|pip_on) rgb = (|(pip_on & pip_lit)) ? C_HIT : C_DIM;
+                        if (shot_here) begin
+                            if (target_here) rgb = xmark ? C_MISS : C_HIT;
+                            else if (dot)    rgb = C_MISS;
+                        end else if (phase == PH_OVER && target_here) begin
+                            rgb = C_SHIP;                // reveal what was left
+                        end
+                        if (phase == PH_BATTLE && side == turn &&
+                            cell_x == cur_x && cell_y == cur_y && cursor_edge)
+                            rgb = C_CURSOR;
                     end
                 end
+            end
 
-                if (in_board) begin
-                    if (phase == PH_PLACE && side != turn) begin
-                        rgb = C_BLACK;
-                    end else begin
-                        rgb = C_WATER;
-                        if (grid_line) begin
-                            rgb = C_SEA;
-                        end else if (phase == PH_PLACE) begin
-                            if (own_ship)  rgb = C_SHIP;
-                            if (prev_here) rgb = place_ok ? C_OK : C_BAD;
-                        end else begin
-                            if (shot_here) begin
-                                if (target_here) rgb = xmark ? C_MISS : C_HIT;
-                                else if (dot)    rgb = C_MISS;
-                            end else if (phase == PH_OVER && target_here) begin
-                                rgb = C_SHIP;
-                            end
-                            if (phase == PH_BATTLE && side == turn && !battle_wait &&
-                                cell_x == cur_x && cell_y == cur_y && cursor_edge)
-                                rgb = C_CURSOR;
-                        end
-                    end
-                end
-
-                if (phase == PH_BATTLE && battle_wait) begin
-                    if (wait_box)   rgb = C_BLACK;
-                    if (text_pixel) rgb = turn ? C_P2 : C_P1;
-                end
-
-                if (phase == PH_OVER) begin
-                    if (win_box)    rgb = C_BLACK;
-                    if (text_pixel) rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
-                end
+            // ---- winner banner ----
+            if (phase == PH_OVER) begin
+                if (win_box)   rgb = C_BLACK;
+                if (txt_pixel) rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
             end
         end
     end
 
     // ------------------------------------------------------------------
-    // Output Registers
+    // Outputs (Tiny VGA Pmod pin order), registered for clean timing
     // ------------------------------------------------------------------
     reg [7:0] uo_reg;
     always @(posedge clk) begin
@@ -595,6 +526,6 @@ module tt_um_vga_example (
     assign uio_oe  = 8'b0;
 
     wire _unused = &{ena, uio_in, ui_in[7], ui_in[3:0], inp_is_present,
-                     press[4], press[10], press[11], rel_y[9:8], 1'b0};
+                     press[4], press[10], press[11], 1'b0};
 
 endmodule
