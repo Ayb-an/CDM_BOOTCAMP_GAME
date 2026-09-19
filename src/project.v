@@ -71,6 +71,7 @@ module tt_um_vga_example (
     wire inp_b, inp_y, inp_select, inp_start;
     wire inp_up, inp_down, inp_left, inp_right;
     wire inp_a, inp_x, inp_l, inp_r;
+    wire inp_is_present;
 
     gamepad_pmod_single gamepad (
         .clk       (clk),
@@ -80,7 +81,8 @@ module tt_um_vga_example (
         .pmod_latch(ui_in[4]),
         .b(inp_b), .y(inp_y), .select(inp_select), .start(inp_start),
         .up(inp_up), .down(inp_down), .left(inp_left), .right(inp_right),
-        .a(inp_a), .x(inp_x), .l(inp_l), .r(inp_r)
+        .a(inp_a), .x(inp_x), .l(inp_l), .r(inp_r),
+        .is_present(inp_is_present)
     );
 
     // Buttons are sampled once per frame; "press" = new press this frame.
@@ -297,6 +299,13 @@ module tt_um_vga_example (
     // Tiny 5x7 text renderer, used only for the help screen and the two
     // short turn-hand-off / winner banners. Character codes 0-19 cover the
     // letters those messages need; 31 (or anything unlisted) renders blank.
+    //
+    // TXT_SCALE / CHAR_W / CHAR_H are all kept as powers of two so that the
+    // pixel->glyph-cell math below (rx/CHAR_W, .../TXT_SCALE) synthesizes as
+    // plain bit-slicing instead of a constant-divider circuit. Using
+    // non-power-of-2 divisors here was the dominant contributor to core
+    // utilization, since this function is instantiated 8 times (one per
+    // on-screen text line).
     // ------------------------------------------------------------------
     function [4:0] font_row;
         input [4:0] ch;
@@ -388,15 +397,16 @@ module tt_um_vga_example (
 
     // 1 = the pixel at (hpos_,vpos_) is lit for message `line_id` drawn with
     // its top-left corner at (tx,ty), scaled up by TXT_SCALE.
-    localparam [3:0] TXT_SCALE = 4'd3;
-    localparam [9:0] CHAR_W    = 10'd18;   // 6 * TXT_SCALE (5px glyph + 1px gap)
-    localparam [9:0] CHAR_H    = 10'd21;   // 7 * TXT_SCALE
+    localparam [3:0] TXT_SCALE = 4'd4;     // power of 2 -> free bit-slicing below
+    localparam [9:0] CHAR_W    = 10'd32;   // 8 * TXT_SCALE (5px glyph + gap, power of 2)
+    localparam [9:0] CHAR_H    = 10'd32;   // 8 * TXT_SCALE (7px glyph + gap, power of 2)
 
     function line_pixel;
         input [9:0] hpos_, vpos_, tx, ty;
         input [3:0] line_id;
         reg [9:0] rx, ry;
-        reg [3:0] cidx, cx, cy;
+        reg [4:0] cidx;
+        reg [3:0] cx, cy;
         reg [4:0] frow;
         begin
             line_pixel = 1'b0;
@@ -404,11 +414,11 @@ module tt_um_vga_example (
                 rx = hpos_ - tx;
                 ry = vpos_ - ty;
                 if (ry < CHAR_H && rx < 12*CHAR_W) begin
-                    cidx = rx / CHAR_W;
-                    cx   = (rx - cidx*CHAR_W) / TXT_SCALE;
-                    cy   = ry / TXT_SCALE;
+                    cidx = rx[9:5];              // rx / CHAR_W  (CHAR_W = 32)
+                    cx   = rx[4:2];               // (rx % CHAR_W) / TXT_SCALE
+                    cy   = ry[4:2];               // ry / TXT_SCALE
                     if (cx < 4'd5) begin
-                        frow = font_row(msg_char(line_id, cidx), cy[2:0]);
+                        frow = font_row(msg_char(line_id, cidx[3:0]), cy[2:0]);
                         line_pixel = frow[4-cx];
                     end
                 end
@@ -417,7 +427,7 @@ module tt_um_vga_example (
     endfunction
 
     // ---- instructions screen (5 lines, centred) ----
-    localparam [9:0] TXT_X   = 10'd212;   // (640 - 12*CHAR_W) / 2
+    localparam [9:0] TXT_X   = 10'd128;   // (640 - 12*CHAR_W) / 2
     localparam [9:0] LINE_SP = 10'd32;
 
     wire help_l0 = line_pixel(hpos, vpos, TXT_X, 10'd90 + 0*LINE_SP, 4'd0);
@@ -617,6 +627,7 @@ module tt_um_vga_example (
     assign uio_out = 8'b0;
     assign uio_oe  = 8'b0;
 
-    wire _unused = &{ena, uio_in, ui_in[7], ui_in[3:0], press[4], press[10], press[11], 1'b0};
+    wire _unused = &{ena, uio_in, ui_in[7], ui_in[3:0], inp_is_present,
+                     press[4], press[10], press[11], 1'b0};
 
 endmodule
