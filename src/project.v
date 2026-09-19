@@ -426,28 +426,48 @@ module tt_um_vga_example (
         end
     endfunction
 
-    // ---- instructions screen (5 lines, centred) ----
+    // ---- text overlay: ONE shared line_pixel call, not eight ----
+    // At any moment only one banner is ever on screen (help XOR hand-off
+    // XOR winner), so instead of instantiating the whole font ROM + message
+    // table once per line (8x duplication -- the dominant area cost after
+    // the divider fix), pick which (ty, line_id) applies to the CURRENT
+    // scanline/phase with cheap comparators, and feed that into a single
+    // shared instantiation of line_pixel.
     localparam [9:0] TXT_X   = 10'd128;   // (640 - 12*CHAR_W) / 2
     localparam [9:0] LINE_SP = 10'd32;
+    localparam [9:0] HELP_TY0 = 10'd90;
+    localparam [9:0] WAIT_TY  = 10'd190;
+    localparam [9:0] WIN_TY   = 10'd190;
 
-    wire help_l0 = line_pixel(hpos, vpos, TXT_X, 10'd90 + 0*LINE_SP, 4'd0);
-    wire help_l1 = line_pixel(hpos, vpos, TXT_X, 10'd90 + 1*LINE_SP, 4'd1);
-    wire help_l2 = line_pixel(hpos, vpos, TXT_X, 10'd90 + 2*LINE_SP, 4'd2);
-    wire help_l3 = line_pixel(hpos, vpos, TXT_X, 10'd90 + 3*LINE_SP, 4'd3);
-    wire help_l4 = line_pixel(hpos, vpos, TXT_X, 10'd90 + 4*LINE_SP, 4'd4);
+    reg [3:0] txt_line_id;
+    reg [9:0] txt_ty;
+    reg [2:0] txt_row;     // which row of the active banner (drives per-row color)
+    reg       txt_active;
+    always @* begin
+        txt_line_id = 4'd0;
+        txt_ty      = 10'd0;
+        txt_row     = 3'd0;
+        txt_active  = 1'b0;
+        if (phase == PH_HELP) begin
+            if      (vpos < HELP_TY0 + 10'd1*LINE_SP) begin txt_row=3'd0; txt_line_id=4'd0; txt_ty=HELP_TY0+10'd0*LINE_SP; txt_active=1'b1; end
+            else if (vpos < HELP_TY0 + 10'd2*LINE_SP) begin txt_row=3'd1; txt_line_id=4'd1; txt_ty=HELP_TY0+10'd1*LINE_SP; txt_active=1'b1; end
+            else if (vpos < HELP_TY0 + 10'd3*LINE_SP) begin txt_row=3'd2; txt_line_id=4'd2; txt_ty=HELP_TY0+10'd2*LINE_SP; txt_active=1'b1; end
+            else if (vpos < HELP_TY0 + 10'd4*LINE_SP) begin txt_row=3'd3; txt_line_id=4'd3; txt_ty=HELP_TY0+10'd3*LINE_SP; txt_active=1'b1; end
+            else if (vpos < HELP_TY0 + 10'd5*LINE_SP) begin txt_row=3'd4; txt_line_id=4'd4; txt_ty=HELP_TY0+10'd4*LINE_SP; txt_active=1'b1; end
+        end else if (phase == PH_BATTLE && battle_wait) begin
+            if      (vpos < WAIT_TY + 10'd1*LINE_SP) begin txt_row=3'd0; txt_line_id=4'd5; txt_ty=WAIT_TY+10'd0*LINE_SP; txt_active=1'b1; end
+            else if (vpos < WAIT_TY + 10'd2*LINE_SP) begin txt_row=3'd1; txt_line_id=4'd6; txt_ty=WAIT_TY+10'd1*LINE_SP; txt_active=1'b1; end
+        end else if (phase == PH_OVER) begin
+            if (vpos < WIN_TY + 10'd1*LINE_SP) begin txt_row=3'd0; txt_line_id=4'd7; txt_ty=WIN_TY; txt_active=1'b1; end
+        end
+    end
 
-    // ---- turn hand-off banner (2 lines, on a black box) ----
-    localparam [9:0] WAIT_TY = 10'd190;
-    wire wait_l0  = line_pixel(hpos, vpos, TXT_X, WAIT_TY,           4'd5);
-    wire wait_l1  = line_pixel(hpos, vpos, TXT_X, WAIT_TY + LINE_SP, 4'd6);
+    wire txt_pixel = txt_active && line_pixel(hpos, vpos, TXT_X, txt_ty, txt_line_id);
+
     wire wait_box = (vpos >= WAIT_TY - 10'd8) && (vpos < WAIT_TY + 2*LINE_SP) &&
                     (hpos >= TXT_X  - 10'd8) && (hpos < TXT_X + 12*CHAR_W + 10'd8);
-
-    // ---- winner banner (1 line, on a black box) ----
-    localparam [9:0] WIN_TY = 10'd190;
-    wire win_l0  = line_pixel(hpos, vpos, TXT_X, WIN_TY, 4'd7);
-    wire win_box = (vpos >= WIN_TY - 10'd8) && (vpos < WIN_TY + LINE_SP) &&
-                   (hpos >= TXT_X - 10'd8) && (hpos < TXT_X + 12*CHAR_W + 10'd8);
+    wire win_box  = (vpos >= WIN_TY - 10'd8) && (vpos < WIN_TY + LINE_SP) &&
+                    (hpos >= TXT_X - 10'd8) && (hpos < TXT_X + 12*CHAR_W + 10'd8);
 
     // which board is the pixel in?
     wire in_rows  = (vpos >= BOARD_Y) && (vpos < BOARD_Y + BOARD_SZ);
@@ -545,9 +565,11 @@ module tt_um_vga_example (
             if (phase == PH_HELP) begin
                 // ---- instructions screen ----
                 rgb = C_BLACK;
-                if (help_l0)                      rgb = C_MISS;                  // title
-                if (help_l1 | help_l2 | help_l3)  rgb = C_SHIP;                  // controls
-                if (help_l4)                      rgb = blink ? C_CURSOR : C_DIM; // blinking prompt
+                if (txt_pixel) begin
+                    if (txt_row == 3'd0)      rgb = C_MISS;                   // title
+                    else if (txt_row == 3'd4) rgb = blink ? C_CURSOR : C_DIM; // blinking prompt
+                    else                       rgb = C_SHIP;                  // controls (rows 1-3)
+                end
 
             end else begin
                 rgb = C_SEA;
@@ -602,14 +624,14 @@ module tt_um_vga_example (
 
                 // ---- turn hand-off pause ----
                 if (phase == PH_BATTLE && battle_wait) begin
-                    if (wait_box)          rgb = C_BLACK;
-                    if (wait_l0 | wait_l1) rgb = turn ? C_P2 : C_P1;
+                    if (wait_box)  rgb = C_BLACK;
+                    if (txt_pixel) rgb = turn ? C_P2 : C_P1;
                 end
 
                 // ---- winner banner ----
                 if (phase == PH_OVER) begin
-                    if (win_box) rgb = C_BLACK;
-                    if (win_l0)  rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
+                    if (win_box)   rgb = C_BLACK;
+                    if (txt_pixel) rgb = flash_off ? C_MISS : (turn ? C_P2 : C_P1);
                 end
             end
         end
